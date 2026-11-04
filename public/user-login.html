@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Login User - Laporan PA LP3I Depok</title>
+  <link rel="stylesheet" href="/style.css?v=20261020-39">
+</head>
+<body>
+  <main class="login-wrap auth-wrap">
+    <div class="auth-shell">
+      <aside class="auth-aside user-aside">
+        <a class="landing-brand" href="/" aria-label="Kembali ke beranda"><img class="landing-brand-logo" src="/assets/lp3i-logo-cropped.png" alt="Politeknik LP3I Jakarta Kampus Depok"></a>
+        <span class="auth-role">RUANG PENGGUNA</span>
+        <h1>Catat aktivitas bimbingan Anda.</h1>
+        <p>Buat laporan, lampirkan dokumen, dan simpan arsip pribadi Anda dalam satu ruang kerja.</p>
+        <div class="auth-aside-footer"><span class="status-dot"></span> Laporan hanya terlihat oleh Anda dan administrator</div>
+      </aside>
+      <form id="loginForm" class="login-card auth-card" data-role="user">
+        <p class="eyebrow">SELAMAT DATANG KEMBALI</p>
+        <h2>Masuk ke ruang pengguna</h2>
+        <p class="muted">Masukkan username dan password untuk masuk ke akun Anda.</p>
+        <label>Username<input name="username" autocomplete="username" required placeholder="Masukkan username"></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" required placeholder="Masukkan password"></label>
+        <button id="loginSubmitBtn" class="primary full" type="submit">Masuk sebagai User <span aria-hidden="true">→</span></button>
+        <p id="loginError" class="error" role="alert"></p>
+        <a class="back-link" href="/">← Kembali ke pilihan ruang kerja</a>
+        <p class="auth-privacy">Akun Anda hanya digunakan untuk mengakses sistem laporan LP3I Depok.</p>
+      </form>
+    </div>
+  </main>
+  <script src="/login.js?v=20261016-7"></script>
+</body>
+</html>

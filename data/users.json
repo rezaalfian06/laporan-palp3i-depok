@@ -1,0 +1,17 @@
+[
+  {
+    "id": 1,
+    "username": "admin",
+    "name": "Administrator",
+    "password": "$2a$10$jMBK0yMFSjkbMEAKyxEHhuKbYUdfyqs5dNbHjnYfOxiS72NLEi5a2",
+    "role": "admin"
+  },
+  {
+    "id": "179249889042791su4",
+    "username": "user",
+    "password": "$2a$10$7zFFwLBiasHUNdPwvnX0M.7YZA76MixgEWqih285FYisY/JY8JQ6S",
+    "name": "Pengguna",
+    "role": "user",
+    "createdAt": "2026-10-20T12:21:30.566Z"
+  }
+]

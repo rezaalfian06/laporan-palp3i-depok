@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dashboard Admin - Laporan PA LP3I Depok</title>
+  <link rel="stylesheet" href="/style.css?v=20261020-39">
+</head>
+<body data-role="admin">
+  <div class="app">
+    <aside class="sidebar">
+      <div class="side-brand"><img class="side-brand-logo" src="/assets/lp3i-logo-cropped.png" alt="Politeknik LP3I Jakarta Kampus Depok"><div><small>Panel Admin</small></div></div>
+      <p class="side-label">MENU ADMIN</p>
+      <nav class="side-navigation" aria-label="Navigasi utama">
+        <a class="nav active" href="#historyPanel"><span aria-hidden="true">▦</span> Semua laporan</a>
+        <a class="nav" href="#reportFormPanel"><span aria-hidden="true">＋</span> Buat laporan</a>
+        <a class="nav" href="#usersSection"><span aria-hidden="true">◎</span> Manajemen akun</a>
+      </nav>
+      <div class="side-note"><b>Ruang kerja admin</b><p>Kelola laporan akademik dan akses pengguna dari satu panel.</p></div>
+      <div class="side-bottom"><span class="avatar" id="sideAvatar" aria-label="Profil administrator">A</span><div><b id="sideName">Administrator</b><small>Administrator</small></div></div>
+    </aside>
+    <main class="main">
+      <header class="topbar"><div class="topbar-title"><span class="eyebrow">RUANG KERJA · ADMINISTRATOR</span><h2>Manajemen Laporan PA</h2><p>Ringkasan dan pengelolaan laporan Pembimbing Akademik.</p><span class="today-badge"><span aria-hidden="true">◷</span><time id="todayLabel"></time></span></div><div class="profile"><span class="profile-avatar" id="profileAvatar" aria-label="Profil administrator">A</span><span id="topName"></span><button id="themeToggle" class="theme-toggle" type="button" aria-label="Aktifkan mode gelap" aria-pressed="false" title="Aktifkan mode gelap"><span aria-hidden="true">☾</span></button><a class="topbar-cta" href="#reportFormPanel">＋ Buat laporan</a><button id="logoutBtn" class="light">Keluar <span aria-hidden="true">↗</span></button></div></header>
+      <section class="stats">
+        <div class="stat"><div class="stat-heading"><span>Total laporan</span><span class="stat-icon" aria-hidden="true">▦</span></div><strong id="statReports">0</strong><small>Semua laporan tersimpan</small></div>
+        <div class="stat"><div class="stat-heading"><span>Laporan bulan ini</span><span class="stat-icon" aria-hidden="true">◷</span></div><strong id="statMonth">0</strong><small>Aktivitas bulan berjalan</small></div>
+        <div class="stat"><div class="stat-heading"><span>Nama PA tercatat</span><span class="stat-icon" aria-hidden="true">◎</span></div><strong id="statPA">0</strong><small>PA yang berbeda</small></div>
+        <div class="stat"><div class="stat-heading"><span>Lampiran tercatat</span><span class="stat-icon" aria-hidden="true">↗</span></div><strong id="statFiles">0</strong><small>Dokumen tersimpan</small></div>
+      </section>
+      <div id="notice" class="notice hidden" role="status" aria-live="polite" aria-atomic="true"><span class="notice-icon" aria-hidden="true"></span><span class="notice-message"></span></div>
+      <section class="content-grid">
+        <section class="panel form-panel" id="reportFormPanel">
+          <div class="panel-heading"><div><p class="eyebrow">FORMULIR BARU</p><h2 id="reportFormTitle">Buat laporan</h2><p class="muted" id="reportFormDescription">Isi informasi laporan di bawah ini.</p></div><span class="plus">＋</span></div>
+          <form id="reportForm" enctype="multipart/form-data">
+            <label>Nama PA <em>*</em><input name="paName" required placeholder="Masukkan nama Pembimbing Akademik"></label>
+            <label>Kelas <em>*</em><input name="kelas" required placeholder="Contoh: MI-25A atau AK-24B"></label>
+            <label>Tanggal laporan <em>*</em><input name="tanggal" type="date" id="tanggal" required></label>
+            <label>Lampiran file <span class="muted inline">(opsional)</span><div class="filebox"><span class="upload-icon">⇧</span><div><b id="fileLabel">Pilih file laporan</b><small>PDF, JPG, PNG, DOC, DOCX, XLS, XLSX · Maks. 10 MB. PDF dan gambar dapat dipratinjau.</small><input name="lampiran" id="lampiran" type="file" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"></div><label class="browse" for="lampiran">Telusuri</label></div></label>
+            <label>Catatan laporan <em>*</em><textarea name="catatan" required rows="4" placeholder="Tuliskan ringkasan kegiatan, hasil bimbingan, atau tindak lanjut..."></textarea></label>
+            <div class="form-actions"><button id="reportSubmitBtn" class="primary full" type="submit">＋　Simpan laporan</button><button id="cancelEditBtn" class="light full hidden" type="button">Batal edit</button></div><p id="formError" class="error" role="alert"></p>
+          </form>
+        </section>
+        <section class="panel history-panel" id="historyPanel">
+          <div class="panel-heading history-heading"><div><p class="eyebrow">ARSIP AKTIVITAS</p><h2>Semua laporan</h2><p class="muted" id="historyDescription">Admin dapat melihat dan mengelola semua laporan.</p></div><button id="exportBtn" class="light">Ekspor CSV</button></div>
+          <div class="archive-tools">
+            <label class="search-wrap"><span aria-hidden="true">⌕</span><input id="searchInput" type="search" placeholder="Cari PA, kelas, atau catatan..." aria-label="Cari laporan"></label>
+            <label class="filter-wrap"><span>Kelas</span><select id="classFilter" aria-label="Filter laporan berdasarkan kelas"><option value="">Semua kelas</option></select></label>
+            <label class="filter-wrap"><span>Urutkan</span><select id="sortOrder" aria-label="Urutkan laporan"><option value="newest">Tanggal terbaru</option><option value="oldest">Tanggal terlama</option></select></label>
+            <button id="clearFiltersBtn" class="clear-filters" type="button" disabled>Reset filter</button>
+          </div>
+          <div id="reportsList" class="reports-list"><div class="empty">Memuat laporan...</div></div>
+          <p id="countLabel" class="muted count-label">Menampilkan 0 laporan</p>
+          <nav id="pagination" class="pagination hidden" aria-label="Navigasi halaman laporan">
+            <button id="previousPageBtn" class="light page-button" type="button">← Sebelumnya</button>
+            <span id="pageLabel" class="page-label" aria-live="polite"></span>
+            <button id="nextPageBtn" class="light page-button" type="button">Berikutnya →</button>
+          </nav>
+          <section id="usersSection" class="users-section">
+            <div class="panel-heading"><div><p class="eyebrow">MANAJEMEN AKUN</p><h2>Tambah pengguna</h2></div></div>
+            <form id="userForm" class="user-form">
+              <label>Nama<input name="name" required placeholder="Nama lengkap"></label>
+              <label>Username<input name="username" required placeholder="Username baru"></label>
+              <label>Password<input name="password" type="password" required minlength="6" placeholder="Minimal 6 karakter"></label>
+              <label>Role<select id="newUserRole" name="role"><option value="user">User</option><option value="admin">Admin</option></select></label>
+              <button class="primary" type="submit">Tambah akun</button><p id="userError" class="error" role="alert"></p>
+            </form>
+            <h3>Daftar akun</h3><div id="usersList" class="users-list"></div>
+          </section>
+        </section>
+      </section>
+      <footer>LP3I Depok · Panel Admin Laporan Pembimbing Akademik</footer>
+    </main>
+  </div>
+  <dialog id="confirmDialog" class="confirm-dialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+    <div class="confirm-content">
+      <span class="confirm-icon" aria-hidden="true">!</span>
+      <p class="eyebrow">KONFIRMASI TINDAKAN</p>
+      <h2 id="confirmTitle">Hapus data ini?</h2>
+      <p id="confirmMessage" class="confirm-message"></p>
+      <div id="confirmDetail" class="confirm-detail hidden"></div>
+      <div class="confirm-actions">
+        <button id="confirmCancelBtn" class="light" type="button">Batal</button>
+        <button id="confirmAcceptBtn" class="confirm-danger" type="button">Ya, hapus</button>
+      </div>
+    </div>
+  </dialog>
+  <script src="/app.js?v=20261016-14"></script>
+</body>
+</html>
