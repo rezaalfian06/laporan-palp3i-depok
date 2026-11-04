@@ -8,6 +8,7 @@ let userSubmitting = false;
 let currentReportPage = 1;
 const reportsPerPage = 6;
 const dateInput = $('#tanggal');
+let maxUploadBytes = 10 * 1024 * 1024;
 let noticeTimer;
 dateInput.value = new Date().toLocaleDateString('en-CA');
 $('#todayLabel').textContent = new Intl.DateTimeFormat('id-ID', { dateStyle: 'full' }).format(new Date());
@@ -396,8 +397,8 @@ $('#reportForm').addEventListener('submit', async event => {
   $('#formError').textContent = '';
   const form = event.currentTarget;
   const file = $('#lampiran').files[0];
-  if (file && file.size > 10 * 1024 * 1024) {
-    $('#formError').textContent = 'Ukuran file maksimal 10 MB.';
+  if (file && file.size > maxUploadBytes) {
+    $('#formError').textContent = `Ukuran file maksimal ${maxUploadBytes / (1024 * 1024)} MB.`;
     return;
   }
 
@@ -691,6 +692,16 @@ async function loadUsers() {
     $('#userError').textContent = error.message;
   }
 }
+
+api('/api/health').then(data => {
+  maxUploadBytes = data.maxUploadMb * 1024 * 1024;
+  const uploadHelp = $('#uploadHelp');
+  if (uploadHelp) {
+    uploadHelp.textContent = `PDF, JPG, PNG, DOC, DOCX, XLS, XLSX · Maks. ${data.maxUploadMb} MB. PDF dan gambar dapat dipratinjau.`;
+  }
+}).catch(error => {
+  showNotice(error.message, 'error');
+});
 
 api('/api/me').then(data => {
   if (!data.user) {

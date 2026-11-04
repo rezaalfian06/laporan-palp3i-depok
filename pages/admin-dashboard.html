@@ -35,7 +35,7 @@
             <label>Nama PA <em>*</em><input name="paName" required placeholder="Masukkan nama Pembimbing Akademik"></label>
             <label>Kelas <em>*</em><input name="kelas" required placeholder="Contoh: MI-25A atau AK-24B"></label>
             <label>Tanggal laporan <em>*</em><input name="tanggal" type="date" id="tanggal" required></label>
-            <label>Lampiran file <span class="muted inline">(opsional)</span><div class="filebox"><span class="upload-icon">⇧</span><div><b id="fileLabel">Pilih file laporan</b><small>PDF, JPG, PNG, DOC, DOCX, XLS, XLSX · Maks. 10 MB. PDF dan gambar dapat dipratinjau.</small><input name="lampiran" id="lampiran" type="file" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"></div><label class="browse" for="lampiran">Telusuri</label></div></label>
+            <label>Lampiran file <span class="muted inline">(opsional)</span><div class="filebox"><span class="upload-icon">⇧</span><div><b id="fileLabel">Pilih file laporan</b><small id="uploadHelp">PDF, JPG, PNG, DOC, DOCX, XLS, XLSX · Maks. 10 MB.</small><input name="lampiran" id="lampiran" type="file" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"></div><label class="browse" for="lampiran">Telusuri</label></div></label>
             <label>Catatan laporan <em>*</em><textarea name="catatan" required rows="4" placeholder="Tuliskan ringkasan kegiatan, hasil bimbingan, atau tindak lanjut..."></textarea></label>
             <div class="form-actions"><button id="reportSubmitBtn" class="primary full" type="submit">＋　Simpan laporan</button><button id="cancelEditBtn" class="light full hidden" type="button">Batal edit</button></div><p id="formError" class="error" role="alert"></p>
           </form>

@@ -1,6 +1,6 @@
 
 const express = require("express");
-const session = require("express-session");
+const cookieSession = require("cookie-session");
 const multer = require("multer");
 const bcrypt = require("bcryptjs");
 const PDFDocument = require("pdfkit");
@@ -8,12 +8,37 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 const PORT = process.env.PORT || 3002;
 const HOST = process.env.HOST || "0.0.0.0";
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const loginRateLimits = new Map();
+const IS_VERCEL = Boolean(process.env.VERCEL);
+const MAX_UPLOAD_BYTES = IS_VERCEL ? 4 * 1024 * 1024 : 10 * 1024 * 1024;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "laporan-attachments";
+const SESSION_SECRET = process.env.SESSION_SECRET;
+const usesSupabase = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+if (IS_VERCEL) app.set("trust proxy", 1);
+
+if (Boolean(SUPABASE_URL) !== Boolean(SUPABASE_SERVICE_ROLE_KEY)) {
+  throw new Error("SUPABASE_URL dan SUPABASE_SERVICE_ROLE_KEY harus diatur bersama.");
+}
+if (IS_VERCEL && !usesSupabase) {
+  throw new Error("SUPABASE_URL dan SUPABASE_SERVICE_ROLE_KEY wajib diatur di Vercel.");
+}
+if (IS_VERCEL && (!SESSION_SECRET || SESSION_SECRET.length < 32)) {
+  throw new Error("SESSION_SECRET wajib diatur dengan minimal 32 karakter di Vercel.");
+}
+
+const supabase = usesSupabase
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    })
+  : null;
 
 // =====================================
 // KONFIGURASI FOLDER
@@ -24,8 +49,10 @@ const PAGES_DIR = path.join(__dirname, "pages");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const REPORTS_FILE = path.join(DATA_DIR, "reports.json");
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+if (!usesSupabase) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
 
 // =====================================
 // MIDDLEWARE
@@ -35,25 +62,41 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
 app.use(
-  session({
-    secret:
-      process.env.SESSION_SECRET ||
-      crypto.randomBytes(32).toString("hex"),
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      maxAge: 8 * 60 * 60 * 1000,
-    },
+  cookieSession({
+    name: "connect.sid",
+    keys: [SESSION_SECRET || crypto.randomBytes(32).toString("hex")],
+    httpOnly: true,
+    sameSite: "lax",
+    secure: IS_VERCEL || process.env.NODE_ENV === "production",
+    maxAge: 8 * 60 * 60 * 1000,
   })
 );
 
 // =====================================
-// FUNGSI BACA DAN SIMPAN JSON
+// FUNGSI DATA PERSISTEN
 // =====================================
-function readJSON(filePath, defaultValue = []) {
+function tableForFile(filePath) {
+  if (filePath === USERS_FILE) return "users";
+  if (filePath === REPORTS_FILE) return "reports";
+  throw new Error(`Lokasi data tidak dikenal: ${filePath}`);
+}
+
+async function readJSON(filePath, defaultValue = []) {
+  if (usesSupabase) {
+    const table = tableForFile(filePath);
+    const records = [];
+    for (let offset = 0; ; offset += 1000) {
+      const { data, error } = await supabase
+        .from(table)
+        .select("record")
+        .order("id")
+        .range(offset, offset + 999);
+      if (error) throw error;
+      records.push(...data.map((row) => row.record));
+      if (data.length < 1000) return records;
+    }
+  }
+
   try {
     if (!fs.existsSync(filePath)) {
       fs.writeFileSync(
@@ -77,8 +120,54 @@ function readJSON(filePath, defaultValue = []) {
   }
 }
 
-function writeJSON(filePath, data) {
+async function writeJSON(filePath, data) {
+  if (usesSupabase) {
+    const table = tableForFile(filePath);
+    for (let offset = 0; offset < data.length; offset += 500) {
+      const records = data.slice(offset, offset + 500).map((record) => ({
+        id: String(record.id),
+        record,
+      }));
+      const { error } = await supabase.from(table).upsert(records);
+      if (error) throw error;
+    }
+    return;
+  }
+
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+}
+
+async function saveRecord(filePath, record) {
+  if (usesSupabase) {
+    const { error } = await supabase
+      .from(tableForFile(filePath))
+      .upsert({ id: String(record.id), record });
+    if (error) throw error;
+    return;
+  }
+
+  const records = await readJSON(filePath, []);
+  const index = records.findIndex((item) => String(item.id) === String(record.id));
+  if (index < 0) records.push(record);
+  else records[index] = record;
+  await writeJSON(filePath, records);
+}
+
+async function deleteRecord(filePath, id) {
+  if (usesSupabase) {
+    const { error } = await supabase
+      .from(tableForFile(filePath))
+      .delete()
+      .eq("id", String(id));
+    if (error) throw error;
+    return;
+  }
+
+  const records = await readJSON(filePath, []);
+  await writeJSON(
+    filePath,
+    records.filter((record) => String(record.id) !== String(id))
+  );
 }
 
 function isRateLimited(bucket, key, limit, windowMs = RATE_LIMIT_WINDOW_MS) {
@@ -106,16 +195,36 @@ function isRateLimited(bucket, key, limit, windowMs = RATE_LIMIT_WINDOW_MS) {
   return false;
 }
 
-function saveSession(req) {
-  return new Promise((resolve, reject) => {
-    req.session.save((error) => (error ? reject(error) : resolve()));
-  });
+async function isLoginRateLimited(key, limit) {
+  if (!usesSupabase) {
+    return isRateLimited(loginRateLimits, key, limit);
+  }
+
+  const id = crypto.createHash("sha256").update(key).digest("hex");
+  const { data, error } = await supabase
+    .from("login_limits")
+    .select("record")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw error;
+
+  const now = Date.now();
+  const timestamps = (data?.record?.timestamps || []).filter(
+    (timestamp) => now - timestamp < RATE_LIMIT_WINDOW_MS
+  );
+  const limited = timestamps.length >= limit;
+  if (!limited) timestamps.push(now);
+
+  const { error: saveError } = await supabase
+    .from("login_limits")
+    .upsert({ id, record: { timestamps } });
+  if (saveError) throw saveError;
+  return limited;
 }
 
 function regenerateSession(req) {
-  return new Promise((resolve, reject) => {
-    req.session.regenerate((error) => (error ? reject(error) : resolve()));
-  });
+  req.session = null;
+  req.session = {};
 }
 
 function normalizeReportRecord(report) {
@@ -150,35 +259,64 @@ function normalizeReportRecord(report) {
 // =====================================
 // INISIALISASI DATA DAN AKUN DEMO
 // =====================================
-function initializeData() {
-  if (!fs.existsSync(USERS_FILE)) {
-    writeJSON(USERS_FILE, []);
+async function initializeData() {
+  if (!usesSupabase) {
+    if (!fs.existsSync(USERS_FILE)) {
+      await writeJSON(USERS_FILE, []);
+    }
+
+    if (!fs.existsSync(REPORTS_FILE)) {
+      await writeJSON(REPORTS_FILE, []);
+    }
   }
 
-  if (!fs.existsSync(REPORTS_FILE)) {
-    writeJSON(REPORTS_FILE, []);
+  const users = await readJSON(USERS_FILE, []);
+  let shouldBootstrapAdmin = false;
+  if (usesSupabase) {
+    const { data: bootstrapState, error } = await supabase
+      .from("app_settings")
+      .select("id")
+      .eq("id", "initial_admin_created")
+      .maybeSingle();
+    if (error) throw error;
+    shouldBootstrapAdmin = !bootstrapState;
   }
 
-  const users = readJSON(USERS_FILE, []);
+  const demoAccounts = usesSupabase
+    ? shouldBootstrapAdmin
+      ? [{
+          username: process.env.INITIAL_ADMIN_USERNAME,
+          password: process.env.INITIAL_ADMIN_PASSWORD,
+          name: process.env.INITIAL_ADMIN_NAME || "Administrator",
+          role: "admin",
+        }]
+      : []
+    : [
+        {
+          username: "admin",
+          password: "admin123",
+          name: "Administrator",
+          role: "admin",
+        },
+        {
+          username: "user",
+          password: "user123",
+          name: "Pengguna",
+          role: "user",
+        },
+      ];
 
-  // Buat akun demo jika belum ada.
-  // Password akun demo yang dibuat di sini:
-  // admin / admin123
-  // user  / user123
-  const demoAccounts = [
-    {
-      username: "admin",
-      password: "admin123",
-      name: "Administrator",
-      role: "admin",
-    },
-    {
-      username: "user",
-      password: "user123",
-      name: "Pengguna",
-      role: "user",
-    },
-  ];
+  if (
+    usesSupabase &&
+    shouldBootstrapAdmin &&
+    (!demoAccounts[0].username ||
+      !demoAccounts[0].password ||
+      demoAccounts[0].password.length < 12)
+  ) {
+    throw new Error(
+      "Atur INITIAL_ADMIN_USERNAME dan INITIAL_ADMIN_PASSWORD (minimal 12 karakter) di Vercel."
+    );
+  }
 
   for (const demo of demoAccounts) {
     const exists = users.some(
@@ -188,46 +326,66 @@ function initializeData() {
     );
 
     if (!exists) {
-      users.push({
-        id: Date.now().toString() + Math.random().toString(36).slice(2, 7),
+      const newUser = {
+        id: usesSupabase
+          ? `bootstrap-${crypto.createHash("sha256").update(demo.username.toLowerCase()).digest("hex")}`
+          : Date.now().toString() + Math.random().toString(36).slice(2, 7),
         username: demo.username,
-        password: bcrypt.hashSync(demo.password, 10),
+        password: await bcrypt.hash(demo.password, 10),
         name: demo.name,
         role: demo.role,
         createdAt: new Date().toISOString(),
-      });
+      };
+      users.push(newUser);
+      if (usesSupabase) await saveRecord(USERS_FILE, newUser);
     }
   }
 
-  writeJSON(USERS_FILE, users);
+  if (usesSupabase && shouldBootstrapAdmin) {
+    const { error } = await supabase.from("app_settings").upsert({
+      id: "initial_admin_created",
+      record: { createdAt: new Date().toISOString() },
+    });
+    if (error) throw error;
+  }
+
+  if (!usesSupabase) {
+    await writeJSON(USERS_FILE, users);
+  }
 
   console.log("Data aplikasi siap.");
-  console.log("Lokasi users.json:", USERS_FILE);
-  console.log("Akun demo: admin / admin123");
-  console.log("Akun demo: user / user123");
+  if (!usesSupabase) {
+    console.log("Lokasi users.json:", USERS_FILE);
+    console.log("Akun demo lokal: admin / admin123 dan user / user123");
+  }
 }
 
-initializeData();
+let initializationPromise;
+function ensureInitialized() {
+  if (!initializationPromise) {
+    initializationPromise = initializeData().catch((error) => {
+      initializationPromise = null;
+      throw error;
+    });
+  }
+  return initializationPromise;
+}
+
+app.use(async (req, res, next) => {
+  try {
+    await ensureInitialized();
+    next();
+  } catch (error) {
+    console.error("Gagal menyiapkan penyimpanan aplikasi:", error);
+    res.status(503).json({
+      message: "Penyimpanan aplikasi belum siap. Periksa konfigurasi database dan storage.",
+    });
+  }
+});
 
 // =====================================
 // KONFIGURASI UPLOAD
 // =====================================
-const storage = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, UPLOAD_DIR);
-  },
-
-  filename: function (req, file, callback) {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const safeName = path
-      .basename(file.originalname, ext)
-      .replace(/[^a-zA-Z0-9_-]/g, "_")
-      .slice(0, 80);
-
-    callback(null, crypto.randomUUID() + "-" + safeName + ext);
-  },
-});
-
 const allowedExtensions = [
   ".png",
   ".jpg",
@@ -240,9 +398,9 @@ const allowedExtensions = [
 ];
 
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: {
-    fileSize: 10 * 1024 * 1024, // Maksimal 10 MB
+    fileSize: MAX_UPLOAD_BYTES,
   },
   fileFilter: function (req, file, callback) {
     const ext = path.extname(file.originalname).toLowerCase();
@@ -259,34 +417,127 @@ const upload = multer({
   },
 });
 
+function createStoredFilename(originalName) {
+  const ext = path.extname(originalName).toLowerCase();
+  const safeName = path
+    .basename(originalName, ext)
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .slice(0, 80);
+  return `${crypto.randomUUID()}-${safeName}${ext}`;
+}
+
+async function storeUploadedFile(file) {
+  const filename = createStoredFilename(file.originalname);
+  if (usesSupabase) {
+    const { error } = await supabase.storage
+      .from(SUPABASE_BUCKET)
+      .upload(filename, file.buffer, {
+        contentType: file.mimetype,
+        upsert: false,
+      });
+    if (error) throw error;
+  } else {
+    fs.writeFileSync(path.join(UPLOAD_DIR, filename), file.buffer);
+  }
+
+  return {
+    filename,
+    name: file.originalname,
+    size: file.size,
+    mimetype: file.mimetype,
+  };
+}
+
+async function deleteStoredFile(filename) {
+  if (!filename) return;
+  if (usesSupabase) {
+    const { error } = await supabase.storage.from(SUPABASE_BUCKET).remove([filename]);
+    if (error) throw error;
+    return;
+  }
+
+  const filePath = path.join(UPLOAD_DIR, path.basename(filename));
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+}
+
+async function readStoredFile(filename) {
+  if (usesSupabase) {
+    const { data, error } = await supabase.storage
+      .from(SUPABASE_BUCKET)
+      .download(filename);
+    if (error) throw error;
+    return Buffer.from(await data.arrayBuffer());
+  }
+
+  return fs.readFileSync(path.join(UPLOAD_DIR, path.basename(filename)));
+}
+
 // =====================================
 // MIDDLEWARE AUTENTIKASI
 // =====================================
-function requireLogin(req, res, next) {
+async function requireLogin(req, res, next) {
   if (!req.session.user) {
     return res.status(401).json({
       message: "Silakan login terlebih dahulu.",
     });
   }
 
-  next();
+  try {
+    const users = await readJSON(USERS_FILE, []);
+    const activeUser = users.find((user) => String(user.id) === String(req.session.user.id));
+    if (!activeUser) {
+      req.session = null;
+      return res.status(401).json({
+        message: "Sesi tidak berlaku. Silakan login kembali.",
+      });
+    }
+
+    req.session.user = {
+      id: activeUser.id,
+      username: activeUser.username,
+      name: activeUser.name || activeUser.username,
+      role: activeUser.role,
+    };
+    next();
+  } catch (error) {
+    console.error("Gagal memvalidasi sesi:", error);
+    res.status(500).json({
+      message: "Gagal memvalidasi sesi pengguna.",
+    });
+  }
 }
 
 function requireAdmin(req, res, next) {
-  if (!req.session.user) {
-    return res.status(401).json({
-      message: "Silakan login terlebih dahulu.",
-    });
-  }
-
-  if (req.session.user.role !== "admin") {
-    return res.status(403).json({
-      message: "Fitur ini hanya dapat diakses oleh admin.",
-    });
-  }
-
-  next();
+  requireLogin(req, res, () => {
+    if (req.session.user.role !== "admin") {
+      return res.status(403).json({
+        message: "Fitur ini hanya dapat diakses oleh admin.",
+      });
+    }
+    next();
+  });
 }
+
+app.get("/api/health", async (req, res) => {
+  try {
+    if (usesSupabase) {
+      const { error } = await supabase.storage.getBucket(SUPABASE_BUCKET);
+      if (error) throw error;
+    }
+
+    res.json({
+      status: "ok",
+      storage: usesSupabase ? "supabase" : "local",
+      maxUploadMb: MAX_UPLOAD_BYTES / (1024 * 1024),
+    });
+  } catch (error) {
+    console.error("Pemeriksaan penyimpanan gagal:", error);
+    res.status(503).json({
+      status: "error",
+      message: "Koneksi database atau bucket lampiran belum siap.",
+    });
+  }
+});
 
 // =====================================
 // HALAMAN UTAMA
@@ -339,13 +590,13 @@ app.post("/api/login", async (req, res) => {
     const role = String(req.body.role || "");
     const clientIp = req.ip || req.socket.remoteAddress || "unknown";
 
-    if (isRateLimited(loginRateLimits, clientIp, 10)) {
+    if (await isLoginRateLimited(clientIp, 10)) {
       return res.status(429).json({
         message: "Terlalu banyak percobaan login. Coba lagi dalam 15 menit.",
       });
     }
 
-    const users = readJSON(USERS_FILE, []);
+    const users = await readJSON(USERS_FILE, []);
 
     const foundUser = users.find(
       (u) =>
@@ -384,7 +635,6 @@ app.post("/api/login", async (req, res) => {
       name: foundUser.name || foundUser.username,
       role: foundUser.role,
     };
-    await saveSession(req);
     return res.json({
       message: "Login berhasil.",
       user: req.session.user,
@@ -402,42 +652,53 @@ app.post("/api/login", async (req, res) => {
 // LOGOUT
 // =====================================
 app.post("/api/logout", (req, res) => {
-  req.session.destroy((error) => {
-    if (error) {
-      return res.status(500).json({
-        message: "Gagal logout.",
-      });
-    }
-
-    res.clearCookie("connect.sid");
-
-    res.json({
-      message: "Logout berhasil.",
-    });
+  req.session = null;
+  res.clearCookie("connect.sid");
+  res.clearCookie("connect.sid.sig");
+  res.json({
+    message: "Logout berhasil.",
   });
 });
 
 // =====================================
 // CEK USER YANG SEDANG LOGIN
 // =====================================
-app.get("/api/me", (req, res) => {
+app.get("/api/me", async (req, res) => {
   if (!req.session.user) {
     return res.json({
       user: null,
     });
   }
 
-  res.json({
-    user: req.session.user,
-  });
+  try {
+    const users = await readJSON(USERS_FILE, []);
+    const activeUser = users.find((user) => String(user.id) === String(req.session.user.id));
+    if (!activeUser) {
+      req.session = null;
+      return res.json({ user: null });
+    }
+
+    req.session.user = {
+      id: activeUser.id,
+      username: activeUser.username,
+      name: activeUser.name || activeUser.username,
+      role: activeUser.role,
+    };
+    return res.json({ user: req.session.user });
+  } catch (error) {
+    console.error("Gagal membaca sesi aktif:", error);
+    return res.status(500).json({
+      message: "Gagal memeriksa sesi pengguna.",
+    });
+  }
 });
 
 // =====================================
 // DAFTAR LAPORAN
 // =====================================
-app.get("/api/reports", requireLogin, (req, res) => {
+app.get("/api/reports", requireLogin, async (req, res) => {
   try {
-    const storedReports = readJSON(REPORTS_FILE, []);
+    const storedReports = await readJSON(REPORTS_FILE, []);
     const visibleReports = req.session.user.role === "admin"
       ? storedReports
       : storedReports.filter((report) =>
@@ -449,6 +710,7 @@ app.get("/api/reports", requireLogin, (req, res) => {
 
     res.json(payload);
   } catch (error) {
+    console.error("Gagal membaca daftar laporan:", error);
     res.status(500).json({
       message: "Gagal membaca daftar laporan.",
     });
@@ -463,9 +725,10 @@ app.post(
   "/api/reports",
   requireLogin,
   upload.fields([{ name: "file", maxCount: 1 }, { name: "lampiran", maxCount: 1 }]),
-  (req, res) => {
+  async (req, res) => {
     const uploadedFile = req.files?.file?.[0] || req.files?.lampiran?.[0] || req.file;
     let reportSaved = false;
+    let storedAttachment = null;
     try {
       const paName = String(req.body.paName || req.body.title || "").trim();
       const kelas = String(req.body.kelas || "").trim();
@@ -473,13 +736,13 @@ app.post(
       const catatan = String(req.body.catatan || req.body.description || "").trim();
 
       if (!paName || !kelas || !tanggal || !catatan) {
-        if (uploadedFile) fs.unlinkSync(uploadedFile.path);
         return res.status(400).json({
           message: "Semua field wajib diisi, termasuk PA, kelas, tanggal, dan catatan.",
         });
       }
 
-      const reports = readJSON(REPORTS_FILE, []);
+      const reports = await readJSON(REPORTS_FILE, []);
+      storedAttachment = uploadedFile ? await storeUploadedFile(uploadedFile) : null;
       const report = {
         id: crypto.randomUUID(),
         paName,
@@ -488,27 +751,21 @@ app.post(
         catatan,
         ownerName: req.session.user.name,
         ownerUsername: req.session.user.username,
-        attachment: uploadedFile
-          ? {
-              filename: uploadedFile.filename,
-              name: uploadedFile.originalname,
-              size: uploadedFile.size,
-              mimetype: uploadedFile.mimetype,
-            }
-          : null,
+        attachment: storedAttachment,
         title: paName,
         description: catatan,
-        originalName: uploadedFile ? uploadedFile.originalname : "",
-        filename: uploadedFile ? uploadedFile.filename : "",
-        mimetype: uploadedFile ? uploadedFile.mimetype : "",
-        size: uploadedFile ? uploadedFile.size : 0,
+        originalName: storedAttachment ? storedAttachment.name : "",
+        filename: storedAttachment ? storedAttachment.filename : "",
+        mimetype: storedAttachment ? storedAttachment.mimetype : "",
+        size: storedAttachment ? storedAttachment.size : 0,
         uploadedBy: req.session.user.username,
         uploadedByName: req.session.user.name,
         createdAt: new Date().toISOString(),
       };
 
       reports.unshift(report);
-      writeJSON(REPORTS_FILE, reports);
+      if (usesSupabase) await saveRecord(REPORTS_FILE, report);
+      else await writeJSON(REPORTS_FILE, reports);
       reportSaved = true;
 
       res.status(201).json({
@@ -517,9 +774,9 @@ app.post(
       });
     } catch (error) {
       console.error("Gagal menyimpan laporan:", error);
-      if (!reportSaved && uploadedFile && fs.existsSync(uploadedFile.path)) {
+      if (!reportSaved && storedAttachment) {
         try {
-          fs.unlinkSync(uploadedFile.path);
+          await deleteStoredFile(storedAttachment.filename);
         } catch (cleanupError) {
           console.error("Gagal membersihkan lampiran sementara:", cleanupError);
         }
@@ -536,15 +793,15 @@ app.put(
   "/api/reports/:id",
   requireLogin,
   upload.fields([{ name: "file", maxCount: 1 }, { name: "lampiran", maxCount: 1 }]),
-  (req, res) => {
+  async (req, res) => {
     const uploadedFile = req.files?.file?.[0] || req.files?.lampiran?.[0] || req.file;
     let reportSaved = false;
+    let storedAttachment = null;
     try {
-      const reports = readJSON(REPORTS_FILE, []);
+      const reports = await readJSON(REPORTS_FILE, []);
       const report = reports.find((item) => String(item.id) === req.params.id);
 
       if (!report) {
-        if (uploadedFile) fs.unlinkSync(uploadedFile.path);
         return res.status(404).json({
           message: "Laporan tidak ditemukan.",
         });
@@ -554,7 +811,6 @@ app.put(
         req.session.user.role !== "admin" &&
         (report.ownerUsername || report.uploadedBy) !== req.session.user.username
       ) {
-        if (uploadedFile) fs.unlinkSync(uploadedFile.path);
         return res.status(403).json({
           message: "Anda hanya dapat mengubah laporan milik sendiri.",
         });
@@ -566,7 +822,6 @@ app.put(
       const catatan = String(req.body.catatan || req.body.description || "").trim();
 
       if (!paName || !kelas || !tanggal || !catatan) {
-        if (uploadedFile) fs.unlinkSync(uploadedFile.path);
         return res.status(400).json({
           message: "Semua field wajib diisi, termasuk PA, kelas, tanggal, dan catatan.",
         });
@@ -574,13 +829,9 @@ app.put(
 
       const oldAttachment = report.attachment || {};
       const oldFilename = oldAttachment.filename || report.filename || "";
-      const attachment = uploadedFile
-        ? {
-            filename: uploadedFile.filename,
-            name: uploadedFile.originalname,
-            size: uploadedFile.size,
-            mimetype: uploadedFile.mimetype,
-          }
+      storedAttachment = uploadedFile ? await storeUploadedFile(uploadedFile) : null;
+      const attachment = storedAttachment
+        ? storedAttachment
         : oldFilename
           ? {
               filename: oldFilename,
@@ -604,19 +855,17 @@ app.put(
         size: attachment ? attachment.size : 0,
       });
 
-      writeJSON(REPORTS_FILE, reports);
+      if (usesSupabase) await saveRecord(REPORTS_FILE, report);
+      else await writeJSON(REPORTS_FILE, reports);
       reportSaved = true;
 
       let message = "Laporan berhasil diperbarui.";
-      if (uploadedFile && oldFilename && oldFilename !== uploadedFile.filename) {
-        const oldFilePath = path.join(UPLOAD_DIR, path.basename(oldFilename));
-        if (fs.existsSync(oldFilePath)) {
-          try {
-            fs.unlinkSync(oldFilePath);
-          } catch (cleanupError) {
-            console.error("Gagal menghapus lampiran lama:", cleanupError);
-            message = "Laporan diperbarui, tetapi lampiran lama gagal dihapus.";
-          }
+      if (storedAttachment && oldFilename && oldFilename !== storedAttachment.filename) {
+        try {
+          await deleteStoredFile(oldFilename);
+        } catch (cleanupError) {
+          console.error("Gagal menghapus lampiran lama:", cleanupError);
+          message = "Laporan diperbarui, tetapi lampiran lama gagal dihapus.";
         }
       }
 
@@ -626,9 +875,9 @@ app.put(
       });
     } catch (error) {
       console.error("Gagal memperbarui laporan:", error);
-      if (!reportSaved && uploadedFile && fs.existsSync(uploadedFile.path)) {
+      if (!reportSaved && storedAttachment) {
         try {
-          fs.unlinkSync(uploadedFile.path);
+          await deleteStoredFile(storedAttachment.filename);
         } catch (cleanupError) {
           console.error("Gagal membersihkan lampiran sementara:", cleanupError);
         }
@@ -645,9 +894,9 @@ app.put(
 // DOWNLOAD / LIHAT FILE LAPORAN
 // Hanya user yang sudah login.
 // =====================================
-app.get("/api/reports/:id/file", requireLogin, (req, res) => {
+app.get("/api/reports/:id/file", requireLogin, async (req, res) => {
   try {
-    const reports = readJSON(REPORTS_FILE, []);
+    const reports = await readJSON(REPORTS_FILE, []);
     const report = reports.find((r) => r.id === req.params.id);
 
     if (!report) {
@@ -668,17 +917,25 @@ app.get("/api/reports/:id/file", requireLogin, (req, res) => {
     const attachment = report.attachment || {};
     const filename = attachment.filename || report.filename || "";
     const originalName = attachment.name || report.originalName || filename;
-    const filePath = path.join(UPLOAD_DIR, path.basename(filename));
 
-    if (!filename || !fs.existsSync(filePath)) {
+    if (!filename) {
       return res.status(404).json({
         message: "File laporan tidak ditemukan di server.",
       });
     }
 
-    res.download(filePath, originalName);
+    const file = await readStoredFile(filename);
+    res.attachment(originalName);
+    res.type(attachment.mimetype || report.mimetype || "application/octet-stream");
+    res.send(file);
   } catch (error) {
     console.error("Gagal mengunduh file:", error);
+
+    if (error.code === "ENOENT" || Number(error.statusCode) === 404) {
+      return res.status(404).json({
+        message: "File laporan tidak ditemukan di penyimpanan.",
+      });
+    }
 
     res.status(500).json({
       message: "Gagal mengunduh file.",
@@ -686,9 +943,9 @@ app.get("/api/reports/:id/file", requireLogin, (req, res) => {
   }
 });
 
-app.get("/api/reports/:id/preview", requireLogin, (req, res) => {
+app.get("/api/reports/:id/preview", requireLogin, async (req, res) => {
   try {
-    const reports = readJSON(REPORTS_FILE, []);
+    const reports = await readJSON(REPORTS_FILE, []);
     const report = reports.find((r) => r.id === req.params.id);
 
     if (!report) {
@@ -708,7 +965,6 @@ app.get("/api/reports/:id/preview", requireLogin, (req, res) => {
 
     const attachment = report.attachment || {};
     const filename = attachment.filename || report.filename || "";
-    const filePath = path.join(UPLOAD_DIR, path.basename(filename));
     const extension = path.extname(filename).toLowerCase();
     const previewTypes = {
       ".pdf": "application/pdf",
@@ -718,25 +974,31 @@ app.get("/api/reports/:id/preview", requireLogin, (req, res) => {
     };
     const contentType = previewTypes[extension];
 
-    if (!filename || !contentType || !fs.existsSync(filePath)) {
+    if (!filename || !contentType) {
       return res.status(404).json({
         message: "Pratinjau file tidak tersedia.",
       });
     }
 
+    const file = await readStoredFile(filename);
     res.set("X-Content-Type-Options", "nosniff");
-    res.type(contentType).sendFile(filePath);
+    res.type(contentType).send(file);
   } catch (error) {
     console.error("Gagal menampilkan pratinjau file:", error);
+    if (error.code === "ENOENT" || Number(error.statusCode) === 404) {
+      return res.status(404).json({
+        message: "Pratinjau file tidak tersedia.",
+      });
+    }
     res.status(500).json({
       message: "Gagal menampilkan pratinjau file.",
     });
   }
 });
 
-app.get("/api/reports/:id/pdf", requireLogin, (req, res) => {
+app.get("/api/reports/:id/pdf", requireLogin, async (req, res) => {
   try {
-    const reports = readJSON(REPORTS_FILE, []);
+    const reports = await readJSON(REPORTS_FILE, []);
     const report = reports.find((item) => item.id === req.params.id);
 
     if (!report) {
@@ -824,9 +1086,9 @@ app.get("/api/reports/:id/pdf", requireLogin, (req, res) => {
 // HAPUS LAPORAN
 // Admin dapat menghapus semua laporan; user hanya miliknya.
 // =====================================
-app.delete("/api/reports/:id", requireLogin, (req, res) => {
+app.delete("/api/reports/:id", requireLogin, async (req, res) => {
   try {
-    const reports = readJSON(REPORTS_FILE, []);
+    const reports = await readJSON(REPORTS_FILE, []);
     const report = reports.find((r) => r.id === req.params.id);
 
     if (!report) {
@@ -844,18 +1106,23 @@ app.delete("/api/reports/:id", requireLogin, (req, res) => {
       });
     }
 
-    const updatedReports = reports.filter(
-      (r) => r.id !== req.params.id
-    );
-
-    writeJSON(REPORTS_FILE, updatedReports);
+    if (usesSupabase) await deleteRecord(REPORTS_FILE, report.id);
+    else {
+      const updatedReports = reports.filter((r) => r.id !== req.params.id);
+      await writeJSON(REPORTS_FILE, updatedReports);
+    }
 
     const attachment = report.attachment || {};
     const filename = attachment.filename || report.filename || "";
-    const filePath = path.join(UPLOAD_DIR, path.basename(filename));
-
-    if (filename && fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+    if (filename) {
+      try {
+        await deleteStoredFile(filename);
+      } catch (cleanupError) {
+        console.error("Laporan dihapus, tetapi lampiran gagal dihapus:", cleanupError);
+        return res.json({
+          message: "Laporan dihapus, tetapi lampiran gagal dihapus dari penyimpanan.",
+        });
+      }
     }
 
     res.json({
@@ -874,9 +1141,9 @@ app.delete("/api/reports/:id", requireLogin, (req, res) => {
 // DAFTAR PENGGUNA
 // Hanya admin.
 // =====================================
-app.get("/api/users", requireAdmin, (req, res) => {
+app.get("/api/users", requireAdmin, async (req, res) => {
   try {
-    const users = readJSON(USERS_FILE, []);
+    const users = await readJSON(USERS_FILE, []);
 
     const safeUsers = users.map((u) => ({
       id: u.id,
@@ -890,6 +1157,7 @@ app.get("/api/users", requireAdmin, (req, res) => {
     payload.users = safeUsers;
     res.json(payload);
   } catch (error) {
+    console.error("Gagal membaca daftar pengguna:", error);
     res.status(500).json({
       message: "Gagal membaca daftar pengguna.",
     });
@@ -925,7 +1193,7 @@ app.post("/api/users", requireAdmin, async (req, res) => {
       });
     }
 
-    const users = readJSON(USERS_FILE, []);
+    const users = await readJSON(USERS_FILE, []);
 
     const exists = users.some(
       (u) =>
@@ -939,7 +1207,7 @@ app.post("/api/users", requireAdmin, async (req, res) => {
     }
 
     const newUser = {
-      id: Date.now().toString(),
+      id: crypto.randomUUID(),
       username,
       password: await bcrypt.hash(password, 10),
       name,
@@ -948,7 +1216,8 @@ app.post("/api/users", requireAdmin, async (req, res) => {
     };
 
     users.push(newUser);
-    writeJSON(USERS_FILE, users);
+    if (usesSupabase) await saveRecord(USERS_FILE, newUser);
+    else await writeJSON(USERS_FILE, users);
 
     res.status(201).json({
       message: "Pengguna berhasil ditambahkan.",
@@ -972,9 +1241,9 @@ app.post("/api/users", requireAdmin, async (req, res) => {
 // HAPUS PENGGUNA
 // Hanya admin.
 // =====================================
-app.delete("/api/users/:id", requireAdmin, (req, res) => {
+app.delete("/api/users/:id", requireAdmin, async (req, res) => {
   try {
-    const users = readJSON(USERS_FILE, []);
+    const users = await readJSON(USERS_FILE, []);
     const target = users.find((u) => String(u.id) === req.params.id);
 
     if (!target) {
@@ -989,11 +1258,11 @@ app.delete("/api/users/:id", requireAdmin, (req, res) => {
       });
     }
 
-    const remainingUsers = users.filter(
-      (u) => String(u.id) !== req.params.id
-    );
-
-    writeJSON(USERS_FILE, remainingUsers);
+    if (usesSupabase) await deleteRecord(USERS_FILE, target.id);
+    else {
+      const remainingUsers = users.filter((u) => String(u.id) !== req.params.id);
+      await writeJSON(USERS_FILE, remainingUsers);
+    }
 
     res.json({
       message: "Pengguna berhasil dihapus.",
@@ -1016,7 +1285,7 @@ app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
     if (error.code === "LIMIT_FILE_SIZE") {
       return res.status(400).json({
-        message: "Ukuran file maksimal 10 MB.",
+        message: `Ukuran file maksimal ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB.`,
       });
     }
 
@@ -1037,30 +1306,34 @@ app.use((error, req, res, next) => {
 // =====================================
 // JALANKAN SERVER
 // =====================================
-const server = app.listen(PORT, HOST, () => {
-  console.log("------------------------------------");
-  console.log("Laporan PA LP3I Depok berjalan");
-  console.log(`Di komputer ini: http://localhost:${PORT}`);
-  const networkAddresses = Object.values(os.networkInterfaces())
-    .flatMap((addresses) => addresses || [])
-    .filter((address) => address.family === "IPv4" && !address.internal)
-    .map((address) => `http://${address.address}:${PORT}`);
-  if (networkAddresses.length) {
-    console.log("Dari perangkat lain di jaringan yang sama:");
-    networkAddresses.forEach((address) => console.log(`  ${address}`));
-  } else {
-    console.log("Alamat IP jaringan lokal tidak ditemukan.");
-  }
-  console.log("------------------------------------");
-});
+if (require.main === module) {
+  const server = app.listen(PORT, HOST, () => {
+    console.log("------------------------------------");
+    console.log("Laporan PA LP3I Depok berjalan");
+    console.log(`Di komputer ini: http://localhost:${PORT}`);
+    const networkAddresses = Object.values(os.networkInterfaces())
+      .flatMap((addresses) => addresses || [])
+      .filter((address) => address.family === "IPv4" && !address.internal)
+      .map((address) => `http://${address.address}:${PORT}`);
+    if (networkAddresses.length) {
+      console.log("Dari perangkat lain di jaringan yang sama:");
+      networkAddresses.forEach((address) => console.log(`  ${address}`));
+    } else {
+      console.log("Alamat IP jaringan lokal tidak ditemukan.");
+    }
+    console.log("------------------------------------");
+  });
 
-server.on("error", (error) => {
-  if (error.code === "EADDRINUSE") {
-    console.log(`Port ${PORT} sudah digunakan.`);
-    console.log(`Aplikasi mungkin sudah berjalan. Buka: http://localhost:${PORT}`);
-    return;
-  }
+  server.on("error", (error) => {
+    if (error.code === "EADDRINUSE") {
+      console.log(`Port ${PORT} sudah digunakan.`);
+      console.log(`Aplikasi mungkin sudah berjalan. Buka: http://localhost:${PORT}`);
+      return;
+    }
 
-  console.error("Server gagal dijalankan:", error.message);
-  process.exitCode = 1;
-});
+    console.error("Server gagal dijalankan:", error.message);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = app;
