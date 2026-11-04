@@ -24,21 +24,35 @@ const SESSION_SECRET = process.env.SESSION_SECRET;
 const usesSupabase = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 if (IS_VERCEL) app.set("trust proxy", 1);
 
-if (Boolean(SUPABASE_URL) !== Boolean(SUPABASE_SERVICE_ROLE_KEY)) {
-  throw new Error("SUPABASE_URL dan SUPABASE_SERVICE_ROLE_KEY harus diatur bersama.");
-}
-if (IS_VERCEL && !usesSupabase) {
-  throw new Error("SUPABASE_URL dan SUPABASE_SERVICE_ROLE_KEY wajib diatur di Vercel.");
-}
-if (IS_VERCEL && (!SESSION_SECRET || SESSION_SECRET.length < 32)) {
-  throw new Error("SESSION_SECRET wajib diatur dengan minimal 32 karakter di Vercel.");
+const missingEnvironmentVariables = [];
+if (IS_VERCEL) {
+  if (!SUPABASE_URL) missingEnvironmentVariables.push("SUPABASE_URL");
+  if (!SUPABASE_SERVICE_ROLE_KEY) {
+    missingEnvironmentVariables.push("SUPABASE_SERVICE_ROLE_KEY");
+  }
+  if (!SESSION_SECRET || SESSION_SECRET.length < 32) {
+    missingEnvironmentVariables.push("SESSION_SECRET (minimal 32 karakter)");
+  }
+  if (!process.env.INITIAL_ADMIN_USERNAME) {
+    missingEnvironmentVariables.push("INITIAL_ADMIN_USERNAME");
+  }
+  if (!process.env.INITIAL_ADMIN_PASSWORD ||
+      process.env.INITIAL_ADMIN_PASSWORD.length < 12) {
+    missingEnvironmentVariables.push("INITIAL_ADMIN_PASSWORD (minimal 12 karakter)");
+  }
 }
 
-const supabase = usesSupabase
-  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+let supabase = null;
+let supabaseClientInitializationError = null;
+if (usesSupabase) {
+  try {
+    supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
       auth: { autoRefreshToken: false, persistSession: false },
-    })
-  : null;
+    });
+  } catch (error) {
+    supabaseClientInitializationError = error;
+  }
+}
 
 // =====================================
 // KONFIGURASI FOLDER
@@ -372,6 +386,8 @@ function ensureInitialized() {
 }
 
 app.use(async (req, res, next) => {
+  if (req.path === "/api/health") return next();
+
   try {
     await ensureInitialized();
     next();
@@ -519,8 +535,31 @@ function requireAdmin(req, res, next) {
 }
 
 app.get("/api/health", async (req, res) => {
+  if (missingEnvironmentVariables.length) {
+    return res.status(503).json({
+      status: "error",
+      check: "configuration",
+      message: "Environment variable Production belum lengkap atau tidak valid.",
+      missingEnvironmentVariables,
+    });
+  }
+  if (supabaseClientInitializationError) {
+    console.error("Gagal membuat client Supabase:", supabaseClientInitializationError);
+    return res.status(503).json({
+      status: "error",
+      check: "configuration",
+      message: "Client Supabase gagal dibuat. Periksa format URL dan service-role key.",
+    });
+  }
+
   try {
     if (usesSupabase) {
+      const { error: databaseError } = await supabase
+        .from("app_settings")
+        .select("id")
+        .limit(1);
+      if (databaseError) throw databaseError;
+
       const { error } = await supabase.storage.getBucket(SUPABASE_BUCKET);
       if (error) throw error;
     }
@@ -534,7 +573,8 @@ app.get("/api/health", async (req, res) => {
     console.error("Pemeriksaan penyimpanan gagal:", error);
     res.status(503).json({
       status: "error",
-      message: "Koneksi database atau bucket lampiran belum siap.",
+      check: "database_or_storage",
+      message: "Koneksi database atau bucket privat belum siap. Periksa schema dan nama bucket.",
     });
   }
 });
