@@ -63,7 +63,7 @@ const PAGES_DIR = path.join(__dirname, "pages");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const REPORTS_FILE = path.join(DATA_DIR, "reports.json");
 
-if (!usesSupabase) {
+if (!usesSupabase && !IS_VERCEL) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
@@ -387,6 +387,15 @@ function ensureInitialized() {
 
 app.use(async (req, res, next) => {
   if (req.path === "/api/health") return next();
+
+  if (IS_VERCEL && missingEnvironmentVariables.length) {
+    return res.status(503).json({
+      status: "error",
+      check: "configuration",
+      message: "Environment variable Production belum lengkap atau tidak valid.",
+      missingEnvironmentVariables,
+    });
+  }
 
   try {
     await ensureInitialized();
